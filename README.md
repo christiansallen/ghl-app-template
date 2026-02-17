@@ -39,13 +39,131 @@ data/                   Created at runtime, gitignored
 - **SSO decryption** — `/sso` endpoint for embedded UI auth
 - **Raw body capture** — Express middleware preserves raw body for signature verification
 
-## What You Customize (TODOs)
+## Customizing for a New App
 
-1. **`.env`** — Your app's client ID, secret, SSO key, and scopes
-2. **`src/services/webhook.js` → `processWebhookEvent()`** — Your event filtering and data mapping
-3. **`src/index.js` → webhook route** — Rename `/webhooks/event` to match your webhook URL
-4. **`package.json`** — App name and description
-5. **`src/index.js` → health check** — App name in the response
+### Step 1: Clone and rename
+
+```bash
+git clone https://github.com/christiansallen/ghl-app-template.git my-ghl-app
+cd my-ghl-app
+rm -rf .git && git init
+```
+
+Update `package.json` with your app's name and description.
+
+### Step 2: Create the app in the GHL Marketplace portal
+
+1. Go to [marketplace.gohighlevel.com](https://marketplace.gohighlevel.com) → **My Apps** → **Create App**
+2. Fill in name, description, category
+3. Under **Auth**, set the **Redirect URI** to `https://your-domain.com/oauth/callback`
+4. Note down your **Client ID**, **Client Secret**, and **SSO Key**
+5. Under **Scopes**, select only the permissions your app needs. Common ones:
+   - `contacts.readonly` / `contacts.write`
+   - `conversations/message.readonly` / `conversations/message.write`
+   - `workflows.readonly`
+   - `locations.readonly`
+   - `opportunities.readonly` / `opportunities.write`
+6. Under **Webhook**, set the URL to `https://your-domain.com/webhooks/event` and select the events you want
+7. If building a **custom trigger**: under **Modules > Workflow**, create the trigger with a subscription URL of `https://your-domain.com/webhooks/trigger`
+
+### Step 3: Configure environment
+
+```bash
+cp .env.example .env
+```
+
+Fill in `.env`:
+```
+GHL_APP_CLIENT_ID=your-client-id
+GHL_APP_CLIENT_SECRET=your-client-secret
+GHL_APP_SSO_KEY=your-sso-key
+GHL_APP_SCOPES=contacts.readonly workflows.readonly
+APP_URL=http://localhost:3000
+```
+
+The `GHL_APP_SCOPES` value must match exactly what you selected in the marketplace portal.
+
+### Step 4: Write your webhook handler
+
+Open `src/services/webhook.js` and edit `processWebhookEvent()`. This is where your app-specific logic goes.
+
+1. **Filter by event type** — Check `payload.messageType`, `payload.type`, or whatever field distinguishes the events you care about
+2. **Extract locationId** — Always pull `payload.locationId` to look up tokens and triggers
+3. **Build eventData** — Map the payload fields to the custom variables you defined in the marketplace portal
+4. **Fire triggers** — The template already handles this with `Promise.allSettled()`
+
+Example for a contact-created trigger:
+```js
+async function processWebhookEvent(payload) {
+  if (payload.type !== "ContactCreate") return;
+
+  const locationId = payload.locationId;
+  if (!locationId) return;
+
+  const triggers = store.getTriggersByLocation(locationId);
+  if (triggers.length === 0) return;
+
+  const eventData = {
+    contactId: payload.id,
+    firstName: payload.firstName || null,
+    lastName: payload.lastName || null,
+    email: payload.email || null,
+    phone: payload.phone || null,
+    dateAdded: payload.dateAdded || new Date().toISOString(),
+    locationId,
+  };
+
+  const results = await Promise.allSettled(
+    triggers.map((t) => ghl.fireTrigger(t.targetUrl, locationId, eventData))
+  );
+
+  results.forEach((result, i) => {
+    if (result.status === "rejected") {
+      console.error(`Failed to fire trigger ${triggers[i].id}:`, result.reason?.message);
+    }
+  });
+}
+```
+
+### Step 5: Rename the webhook route (if needed)
+
+In `src/index.js`, the default webhook route is `/webhooks/event`. Rename it to match whatever you configured in the marketplace portal (e.g., `/webhooks/contact`, `/webhooks/opportunity`).
+
+Also update the health check response and the startup log with your app name.
+
+### Step 6: Configure triggers in the marketplace portal (if applicable)
+
+If your app exposes a custom workflow trigger:
+
+1. Go to **Modules > Workflow > Create Trigger** in the marketplace portal
+2. Paste **Sample Trigger Data** — a JSON object matching the `eventData` your code sends:
+   ```json
+   {
+     "contactId": "abc123",
+     "firstName": "Jane",
+     "lastName": "Doe",
+     "email": "jane@example.com",
+     "phone": "+15551234567",
+     "dateAdded": "2025-01-01T00:00:00.000Z",
+     "locationId": "loc123"
+   }
+   ```
+3. Add **Custom Variables** mapping each field — this is what makes `{{trigger.firstName}}` available in the workflow builder
+4. Set the **Subscription URL** to `https://your-domain.com/webhooks/trigger`
+5. Save and publish a new version
+
+### Step 7: Test locally with ngrok
+
+```bash
+npm run dev          # Terminal 1
+ngrok http 3000      # Terminal 2
+```
+
+Update `.env` with your ngrok URL, then update the marketplace portal URLs (redirect URI, webhook URL, trigger URL) to point to ngrok. See [Local Development](#local-development) for details.
+
+### Step 8: Deploy
+
+Push to GitHub, deploy to Railway/Render/Fly.io, set env vars on the platform, update all marketplace portal URLs to your production domain, and publish a new app version. See [Deployment](#deployment) for details.
 
 ---
 
